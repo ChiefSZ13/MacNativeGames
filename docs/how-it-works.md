@@ -12,6 +12,18 @@ thing for macOS. The rewrites of versions 1.0.0, 1.1.2 and 1.4.3 were verified s
 inputs against the original in an emulator, with negative controls); the build checks that your rewrite is byte for
 byte the selected version (`games/totk/assets/expected-v1.0.0.json` / `expected-v1.1.2.json` / `expected-v1.4.3.json`).
 
+The rewrites are what makes the code the app's own: it is bound by SHA-256, so a patch cannot be applied while the game
+runs. A player mod that changes the code therefore merges its main-module patches *before* that step
+(`--mod <mod folder>`, `games/totk/scripts/mod_exefs.py`): an IPS / IPS32 / pchtxt patch is applied to the verified
+retail main (a `.pchtxt` says in `@nsobid-` which build of main it is for, with `@enabled` / `@disabled` switching the
+sections on and off and `@flag offset_shift 0x100` required before the first patch line; an `.ips` carries no id, so it counts as a
+main patch only when it is named `main` or after main's build id), refused if it lands on a site the app patches itself (the 60 FPS, resolution, ultrawide and cloth sites,
+and the rewriter's registered cuts - `games/totk/scripts/patch_sites.py` reads them out of the C sources, and the signed
+jump tables out of `patch_nso.py`), and the
+merged module is then rewritten and bound like the retail one. Extra code modules a mod ships are not loaded: the app
+loads the three modules below. The same build replaces the version's player mod folder with the mod's RomFS files only
+when `--install-mod-romfs` is given (`games/totk/scripts/mod_folder.py`): that folder may hold files of the player's own.
+
 The loader maps the three rewritten modules (main, sdk, subsdk0) at their original layout, resolves their imports
 against each other, and starts the game's own `nn::init::Start`.
 
@@ -63,6 +75,12 @@ The skill effects classify pixels into a D16 depth attachment and select their c
 The live TOTK 1.4.3 comparison on Apple M4 Pro also reproduced the grid with Recall and removed it with this correction, using the same save and camera sequence described above. This is a targeted Recall check, not a claim that every skill or area was tested.
 
 Historical 1.1.2 Ultrahand captures and the current 1.4.3 Recall pair are hosted in the same [separate evidence attachments](https://github.com/huahuahuahuahuahuahuahua/MacNativeGames/releases/tag/rendering-evidence-20261018) and linked from PR #3. No screenshots, game binaries, extracted assets or saves are included in the code commits.
+
+## Vertex outputs a shader does not write
+
+On Maxwell, a fragment shader reads `(0, 0, 0, 1)` for every component of an input its vertex shader never writes. The Ryujinx translator gives a vertex shader those defaults only for the inputs the next stage reads, which it learns from `SetNextStage`; the service translates every shader on its own, so no next stage is set and nothing was initialised. SPIRV-Cross starts the output struct at zero (`main0_out out = {};`), so the unwritten components reached the fragment shader as 0. The drop marker of a held item depends on them: its vertex shader writes only `xyz` of one output and its fragment shader multiplies the alpha by that output's `w`, so the marker comes out fully transparent. Patch `0005` initialises every user output a vertex shader writes to `(0, 0, 0, 1)` when no next stage is set; the shader's own stores then replace the components it writes.
+
+Over the 18,064 startup variants of a 1.4.3 build, the patched translator changed 6,679 of the 7,000 vertex functions, each only by these initial stores (the variable numbering of the output struct shifts with them); none of the 10,849 fragment and 215 compute shaders changed. With the patch, the marker and its arrow show under a held material on 1.4.3 (Apple M2 Max). The title background gets slightly darker (mean luminance 61.2 -> 57.0): in another native port of this game, the same change was traced to the volumetric light pass, which multiplies the unwritten `w` into the translation column of its shadow matrix, so with `w = 0` the translation was lost. An existing shader cache keeps the vertex functions it already has (the seed import preserves shaders collected on the Mac), so the fix reaches an existing install once its cache is cleared or the chain name changes.
 
 ## Buffer copies through aliased memory
 

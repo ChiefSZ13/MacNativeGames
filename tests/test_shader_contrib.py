@@ -10,6 +10,7 @@ from pathlib import Path
 TOTK = Path(__file__).resolve().parents[1] / 'games/totk'
 sys.path.insert(0, str(TOTK / 'scripts'))
 from shader_list import ShaderList, canonical  # noqa: E402
+from prepare_shader_seed import answers_for, suffix  # noqa: E402
 
 
 @unittest.skipUnless(shutil.which('xcrun'), 'needs the Xcode command line tools')
@@ -29,15 +30,22 @@ class ContributionFileTests(unittest.TestCase):
             self.assertTrue(rows and all(canonical(json.loads(deps)) == deps for _, _, deps in rows), 'deps as canonical() writes them')
             shared = ShaderList()
             shared.add_rows(contrib, 'm')
-            self.assertEqual(len(shared.variants), 1600)
-            self.assertFalse(shared.warm)
+            self.assertEqual(len(shared.variants), 2 * 100 + 60)   # TOTK_CONTRIB_STEP 100
+            self.assertEqual([row[0] for row in shared.warm], ['R', 'B'])   # render pipelines merge with the shaders
+            deps = {'tex': {'9': '*', '10': '*_depth', '3': 'cube'}, 'attr': {'6': 'uint'}, 'fout': {'0': 'float'}}
+            self.assertEqual(json.loads(run.stdout)['listed'], f'{7:064x}-' + suffix(answers_for(deps)),
+                             'a pipeline names its shaders as prepare_shader_seed.py names list rows')
+            noseed = subprocess.run([str(probe), str(contrib), 'noseed'], capture_output=True, text=True)
+            self.assertEqual(noseed.returncode, 0, noseed.stderr)
+            self.assertEqual(json.loads(noseed.stdout)['status'], 'pass')
+            self.assertFalse(contrib.exists(), 'a run without the seed writes no contribution file')
 
 
 if __name__ == '__main__':
     unittest.main()
 
 
-from collect_shader_issues import attachment_urls, contribution_rows  # noqa: E402
+from collect_shader_issues import attachment_urls, contribution_pipelines, contribution_rows  # noqa: E402
 
 
 class IssueCollectionTests(unittest.TestCase):
@@ -51,18 +59,30 @@ class IssueCollectionTests(unittest.TestCase):
                                                  'https://github.com/someone/MacNativeGames/files/456/contrib.txt'])
         self.assertEqual(attachment_urls(None), [])
 
+    def test_an_automatic_submission_is_read_like_a_form_issue(self):
+        link = watch.gist_raw('https://gist.github.com/someone/0123abcd\n')
+        self.assertEqual(link, 'https://gist.githubusercontent.com/someone/0123abcd/raw/shader-list-contribution.txt')
+        self.assertIsNone(watch.gist_raw('error: HTTP 401'))
+        body = watch.issue_body('iPad', link)
+        self.assertEqual(attachment_urls(body), [link])
+        self.assertIn('### Device / 设备\n\niPad\n', body)
+        self.assertNotIn('udid', body.lower())
+
     def test_only_shader_rows_are_taken(self):
         text = '\n'.join([
             '# header', '',
             f'V\t{self.KEY_A}\t{{"tex":{{"9":"2d","10":"3d"}}}}',     # canonicalised
             f'V\t{self.KEY_A}\t{{"tex":{{"10":"3d","9":"2d"}}}}',     # the same row
             f'V\t{self.KEY_B}\t{{}}',
-            f'S\t{self.KEY_A}-0123456789ab_b\t0\tm',                  # warm rows are not taken from contributions
+            f'S\t{self.KEY_A}-0123456789ab_b\t0\tm',                  # shader libraries are not taken from contributions
             f'L\t{self.KEY_A}\tShader/x.bnsh\t0\t880\t100',            # nor locators
+            'R\tabcd', 'R\tabcd', 'B\tabcd\t-\t3:7:0x1p-1,0x1p-1,0x1p-1,0x1p-1;',   # render pipelines are (a row once)
+            'R\tnot hex', 'B\tabcd\t-\t-',
             'V\tnot-a-key\t{}', f'V\t{self.KEY_B}\t{{"local":[1]}}', f'V\t{self.KEY_B}\tnot json'])
         rows, dropped = contribution_rows(text)
         self.assertEqual(rows, {(self.KEY_A, '{"tex":{"10":"3d","9":"2d"}}'), (self.KEY_B, '{}')})
-        self.assertEqual(dropped, 5)
+        self.assertEqual(dropped, 7)
+        self.assertEqual(contribution_pipelines(text), [('R', 'abcd'), ('B', 'abcd', '-', '3:7:0x1p-1,0x1p-1,0x1p-1,0x1p-1;')])
 
 
 sys.path.insert(0, str(TOTK / 'ios/tools'))
@@ -76,9 +96,11 @@ class MacReminderForDevicesTests(unittest.TestCase):
              'connectionProperties': {'pairingState': 'paired', 'transportType': 'localNetwork', 'tunnelState': 'disconnected'}},
             {'identifier': 'B', 'deviceProperties': {'name': 'iPad'}, 'hardwareProperties': {'platform': 'iOS', 'udid': 'u-b'},
              'connectionProperties': {'pairingState': 'paired'}},                                   # not reachable now
+            {'identifier': 'E', 'deviceProperties': {'name': 'Tablet'}, 'hardwareProperties': {'platform': 'iOS', 'udid': 'u-e', 'deviceType': 'iPad'},
+             'connectionProperties': {'pairingState': 'paired', 'transportType': 'wired'}},
             {'identifier': 'C', 'hardwareProperties': {'platform': 'watchOS'}, 'connectionProperties': {'pairingState': 'paired', 'transportType': 'wired'}},
             {'identifier': 'D', 'hardwareProperties': {'platform': 'iOS'}, 'connectionProperties': {'pairingState': 'unpaired', 'transportType': 'wired'}}]}}
-        self.assertEqual(watch.reachable_devices(listing), [('A', 'u-a', 'iPhone')])
+        self.assertEqual(watch.reachable_devices(listing), [('A', 'u-a', 'iPhone', 'iPhone'), ('E', 'u-e', 'Tablet', 'iPad')])
         self.assertEqual(watch.reachable_devices({}), [])
 
     def test_the_game_is_found_by_name_or_bundle(self):
@@ -87,11 +109,11 @@ class MacReminderForDevicesTests(unittest.TestCase):
         self.assertEqual(watch.game_bundle({'result': {'apps': [{'name': 'TOTK', 'bundleIdentifier': 'org.macnativegames.totk'}]}}), 'org.macnativegames.totk')
         self.assertIsNone(watch.game_bundle({'result': {'apps': [{'name': 'Other', 'bundleIdentifier': 'x.y'}]}}))
 
-    def test_rows_and_every_500(self):
-        text = '# header\n' + ''.join(f'V\t{i:064x}\t{{}}\n' for i in range(3)) + f'V\t{0:064x}\t{{}}\n'
-        self.assertEqual(watch.contribution_rows(text), 3)
-        self.assertFalse(watch.due(499, 0)); self.assertTrue(watch.due(500, 0))
-        self.assertFalse(watch.due(999, 500)); self.assertTrue(watch.due(1000, 500))
+    def test_rows_and_every_100(self):
+        text = '# header\n' + ''.join(f'V\t{i:064x}\t{{}}\n' for i in range(3)) + f'V\t{0:064x}\t{{}}\n' + 'R\tab\n' + 'R\tab\n'
+        self.assertEqual(watch.contribution_rows(text), 4)   # shaders and pipelines together
+        self.assertFalse(watch.due(99, 0)); self.assertTrue(watch.due(100, 0))
+        self.assertFalse(watch.due(199, 100)); self.assertTrue(watch.due(200, 100))
 
     def test_agent_runs_check_every_ten_minutes_with_the_xcode(self):
         plist = watch.agent_plist('/usr/bin/python3', Path('/x/shader_contrib_watch.py'), '/X/Xcode.app/Contents/Developer')
@@ -106,3 +128,14 @@ class MacReminderForDevicesTests(unittest.TestCase):
         self.assertIsNone(watch.reminded_at('never\n'))
         self.assertEqual(watch.message(500, 'iPad')[2:], ('Remind me next time', "Don't remind me again", 'Send')
                          if not watch.chinese() else ('下次提醒', '不要提醒了', '发送'))
+
+    def test_gh_replaces_remind_me_next_time_with_submit(self):
+        self.assertEqual(watch.message(500, 'iPad', auto=True)[2:], ('Submit automatically', "Don't remind me again", 'Send')
+                         if not watch.chinese() else ('自动提交', '不要提醒了', '发送'))
+        with tempfile.TemporaryDirectory() as tmp:   # no gh on PATH or in the usual places: no automatic button
+            old = (watch.GH_CANDIDATES, watch.shutil.which)
+            watch.GH_CANDIDATES, watch.shutil.which = (str(Path(tmp) / 'gh'),), lambda name: None
+            try:
+                self.assertIsNone(watch.gh_path())
+            finally:
+                watch.GH_CANDIDATES, watch.shutil.which = old

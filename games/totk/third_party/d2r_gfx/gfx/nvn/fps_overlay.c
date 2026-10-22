@@ -37,9 +37,17 @@ static const Glyph FONT[] = {
     {' ', {0, 0, 0, 0, 0, 0, 0}},
 };
 
-static _Atomic int g_hints_visible = 1;
-int fps_overlay_hints_enabled(void) { return atomic_load_explicit(&g_hints_visible, memory_order_relaxed); }
-int fps_overlay_toggle_hints(void) { return !atomic_fetch_xor_explicit(&g_hints_visible, 1, memory_order_relaxed); }
+/* Key 1 cycles all -> minimal (FPS only) -> off -> all. */
+static _Atomic int g_hud_mode = HUD_MODE_ALL;
+int fps_overlay_hud_mode(void) { return atomic_load_explicit(&g_hud_mode, memory_order_relaxed); }
+int fps_overlay_hints_enabled(void) { return fps_overlay_hud_mode() != HUD_MODE_OFF; }
+int fps_overlay_full_hud(void) { return fps_overlay_hud_mode() == HUD_MODE_ALL; }
+int fps_overlay_toggle_hints(void) {
+    int mode = atomic_load_explicit(&g_hud_mode, memory_order_relaxed), next;
+    do next = mode == HUD_MODE_ALL ? HUD_MODE_MINIMAL : mode == HUD_MODE_MINIMAL ? HUD_MODE_OFF : HUD_MODE_ALL;
+    while (!atomic_compare_exchange_weak_explicit(&g_hud_mode, &mode, next, memory_order_relaxed, memory_order_relaxed));
+    return next;
+}
 
 int fps_overlay_enabled(void) {
     static int on = -1;
@@ -207,6 +215,14 @@ void shader_overlay_text(char *out, size_t n, uint64_t fresh, int64_t total, uin
     (void)pipelines;   // user 2026-10-17: the pipeline count is not shown
     if (total < 0) snprintf(t, sizeof t, "--"); else snprintf(t, sizeof t, "%lld", (long long)(total > 999999 ? 999999 : total));
     snprintf(out, n, TOTK_UI("新着色器 %llu / 总计 %s", "New shaders %llu / total %s"), (unsigned long long)(fresh > 99999 ? 99999 : fresh), t);
+}
+/* The render pipeline line under the shaders (user 2026-10-22: "fps和着色器下面 现在显示渲染管线 信息，新/总计"): pipelines
+   this run built that this profile had never built (new to its warm list), and every render pipeline ready this run
+   (warm-up and play). */
+void pso_overlay_text(char *out, size_t n, uint64_t fresh, int64_t total) {
+    char t[16];
+    if (total < 0) snprintf(t, sizeof t, "--"); else snprintf(t, sizeof t, "%lld", (long long)(total > 999999 ? 999999 : total));
+    snprintf(out, n, TOTK_UI("新渲染管线 %llu / 总计 %s", "New render pipelines %llu / total %s"), (unsigned long long)(fresh > 99999 ? 99999 : fresh), t);
 }
 
 /* A count's rate, re-measured every half second (game presents; interpolated frames shown). stale_s > 0: a gap longer
