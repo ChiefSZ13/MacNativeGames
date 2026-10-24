@@ -205,7 +205,7 @@ int main(int argc, char **argv) {
             const char *v = getenv(name); return v && *v ? @(v) : fallback; };
         NSString *profile = env_or("TOTK_PROFILE_DIR", [data stringByAppendingPathComponent:@"profile"]);
         NSString *slot = env_or("TOTK_GAME_SLOT_DIR", [data stringByAppendingPathComponent:@"game-slot"]);
-        NSString *cache = env_or("TOTK_SHADER_CACHE", [data stringByAppendingPathComponent:[NSString stringWithFormat:@"shader-cache/rt-%s", DMSH_CHAIN]]);
+        NSString *cache = env_or("TOTK_SHADER_CACHE", [data stringByAppendingPathComponent:[NSString stringWithFormat:@"shader-cache/rt-%s%s", DMSH_CHAIN, getenv("TOTK_HDR") && !strcmp(getenv("TOTK_HDR"),"1") ? "-hdr1" : ""]]);
         if (!make_dir(profile) || !make_dir(slot) || !make_dir(cache) || !make_dir(logs)) {
             show_error([NSString stringWithFormat:@"Cannot create %@.", data]);
             return 1;

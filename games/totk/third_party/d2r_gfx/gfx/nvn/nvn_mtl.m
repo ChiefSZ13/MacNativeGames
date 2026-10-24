@@ -25,6 +25,9 @@
 #include "totk_mfx.h"
 #include "totk_mfx_up.h"
 #include "totk_taa.h"
+#include "totk_hdr.h"
+#include "totk_hdr_present.h"
+extern float front_hdr_headroom(void) __attribute__((weak_import));
 #include "totk_sysload.h"
 /* TOTK_MFX_UPSCALE: for the one compose draw that samples the smaller scene, the scene texture and its MetalFX upscale
    (mfxup_draw before the draw, encode_args swaps the binding). */
@@ -578,7 +581,7 @@ void mtl_init(void) {
     for (int i = 0; i < 3; i++) {
         g_present_args[i] = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
         if (!g_present_args[i]) MDIE("建立出图 argument table[%d] 失败：%s", i, ate.localizedDescription.UTF8String);
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
         if (!g_present_uv[i]) MDIE("建立出图 UV 缓冲[%d] 失败", i);
         res_add(g_present_uv[i]);
         if (g_present_probe) {
@@ -5256,6 +5259,19 @@ static NvShader *shader_load(NSString *pc, int stage) {
        them in memory (the Mac's behaviour before). */
     static int keep_src = -1; if (keep_src < 0) { const char *e = getenv("TOTK_KEEP_MSL"); keep_src = e && !strcmp(e, "1"); }
     if (keep_src) o->src = full;
+    if (totk_hdr_requested() && stage==1 && [pc hasPrefix:@"0ac9a54938974396134d911dc0f29c79ce43e3d8cd50b11ee8b85a48ead6d2a5-"]) {
+        NSString *anchor=@"    out.m_34.w = 0.0;";
+        if ([full containsString:anchor] && [full containsString:@"float _69 = _63 + _57;"] &&
+            [full containsString:@"float _71 = _65 + _59;"] && [full containsString:@"float _73 = _67 + _61;"]) {
+            /* Preserve the authored SDR color treatment and diffuse range. Only
+             * the original, exposed scene luminance opens the highlight shoulder. */
+            NSString *body=@"    float hdr_y = max(dot(max(float3(_69,_71,_73),float3(0)),float3(0.2126,0.7152,0.0722))-1.0,0.0);\n    float hdr_gain = 1.0 + 2.5 * hdr_y / (hdr_y + 2.0);\n    out.m_34.xyz = max(out.m_34.xyz,float3(0)) * hdr_gain;\n";
+            NSString *modified=[full stringByReplacingOccurrencesOfString:anchor withString:[body stringByAppendingString:anchor]];
+            NSError *err=nil;id<MTLLibrary> hl=totk_msl_library(modified,&err);
+            if(hl){o->fn=[hl newFunctionWithName:j[@"entry"]];o->src=modified;MLOG("[hdr] scene-guided highlight shoulder enabled; SDR diffuse/UI white = 1");}
+            else MLOG("[hdr] compose variant failed; keeping SDR shader: %s",err.localizedDescription.UTF8String);
+        } else MLOG("[hdr] compose source layout unknown; keeping SDR shader");
+    }
     if (o->rf.nb) {
         o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
         int max_aid = -1;
@@ -11171,6 +11187,7 @@ static void scene_size_note(__unsafe_unretained NvShader *fs) {   // the compose
     uint32_t ow = atomic_exchange(&g_scene_w, w), oh = atomic_exchange(&g_scene_h, h);
     if (ow != w || oh != h) MLOG("内部分辨率（合成采样的场景）：%ux%u", w, h);
 }
+#include "totk_hdr_render.h"
 static int mfxup_draw(NvProg *pr) {
     g_mfxup_src = nil; g_mfxup_out = nil; g_mfxup_sh = nil;
     if (!pr) return 0;
@@ -11228,7 +11245,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     geometry_dump(pr, dw, di);
     if (di && di->itype == 0 && di->count && pend_hits(di->ibuf, (uint64_t)di->count)) widen_indices_gpu(di);
     /* Merge/skip checks can resolve sampling views too; prepare before any of those checks. */
-    if (!S.render_disabled && !S.raster_discard) { prepare_draw_textures(pr); if (mfxup_draw(pr)) return; }   // docked: MetalFX wrote the canvas instead of this draw
+    if (!S.render_disabled && !S.raster_discard) { prepare_draw_textures(pr); if (mfxup_draw(pr)) return; hdr_capture(pr); }   // docked: MetalFX wrote the canvas instead of this draw
     if (g_ruler_truth == 0) {   // 尺子负对照（DM_NVN_RULER_NEG=<片元键>）：被测模式下丢掉该着色器的绘制，尺子必须报不等价 | Ruler negative control (DM_NVN_RULER_NEG=<fragment key>): in the mode under test drop this shader's draws, and the ruler must report non-equivalence
         static const char *neg; static int ng = -1; if (ng < 0) { neg = getenv("DM_NVN_RULER_NEG"); ng = neg && *neg; }
         if (ng && pr) for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (sh && sh->stage == 1 && !strncmp(sh->key, neg, strlen(neg))) { static int once; if (!once++) MLOG("DM_NVN_RULER_NEG：被测模式丢弃着色器 %s 的绘制", sh->key); return; } }
@@ -12536,6 +12553,7 @@ void mtl_exec(const uint8_t *p) {
 
 // ---------- 出图：交换链贴图画到 CAMetalLayer；可选截图 ----------
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
+static id<MTLRenderPipelineState> g_blit_hdr_pso;
 static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
@@ -12995,20 +13013,17 @@ static CAMetalLayer *g_present_layer_resident;
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
 static void present_pipeline(MTLPixelFormat format) {
     if (!g_blit_pso || g_blit_fmt != format) {
-        static const char *src_msl =
-            "#include <metal_stdlib>\nusing namespace metal;\n"
-            "struct V { float4 p [[position]]; float2 uv; };\n"
-            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
-            "struct Crop { float4 rect; float4 edge; };\n"
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
+        NSString *source=totk_hdr_present_source(format);
         NSError *e = nil;
-        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:totk_precise_opts() error:&e];
         if (!lib) MDIE("出图着色器编译失败 %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("出图管线失败 %s", e.localizedDescription.UTF8String);
+        pd.fragmentFunction=[lib newFunctionWithName:@"fshdr"];g_blit_hdr_pso=[g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        if(!g_blit_hdr_pso)MDIE("HDR presentation pipeline: %s",e.localizedDescription.UTF8String);
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
@@ -13148,7 +13163,7 @@ static id<MTLTexture> output_upscale(id<MTL4CommandBuffer> cb, id<MTLTexture> sr
     int timed = g_outup_heap && slot >= 0 && slot < 3;
     if (timed) [cb writeTimestampIntoHeap:g_outup_heap atIndex:(NSUInteger)slot * 2];
     uint64_t t0 = now_ns();
-    id<MTLTexture> out = mfxup_encode_ex(MFXUP_OUTPUT, cb, src, cw, ch, nil, ow, oh, MFXUP_PERCEPTUAL);
+    id<MTLTexture> out = mfxup_encode_ex(MFXUP_OUTPUT, cb, src, cw, ch, nil, ow, oh, hdr_on() && src.pixelFormat==MTLPixelFormatRGBA16Float ? MFXUP_HDR : MFXUP_PERCEPTUAL);
     uint64_t t1 = now_ns();
     if (timed) [cb writeTimestampIntoHeap:g_outup_heap atIndex:(NSUInteger)slot * 2 + 1];
     if (t1 - t0 > 2000000) MLOG("[mfx-up] output: %lux%lu -> %lux%lu, encoding took %.1f ms on the present thread (scaler built)", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh, (t1 - t0) / 1e6);
@@ -13213,11 +13228,13 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp]; es_reset();
     [en setViewport:vp];
-    [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:src atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-    float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
+    [en setRenderPipelineState:hdr_on() && src.pixelFormat==MTLPixelFormatRGBA16Float ? g_blit_hdr_pso : g_blit_pso]; [en setFragmentTexture:src atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
+    float uv[12] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
                    (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
+    uv[8]=1;
     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [en setRenderPipelineState:g_blit_pso];
     MTLViewport ovp; float fuv[8];
     if (fps_overlay && fps_overlay_prepare(3, vp, &ovp, fuv)) {
         [en setViewport:ovp]; [en setFragmentTexture:g_fps_tex[3] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
@@ -13266,11 +13283,16 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = g_present_uv[uv_i].contents;
     uv[0] = (float)cx / pic.width; uv[1] = (float)cy / pic.height; uv[2] = (float)cw / pic.width; uv[3] = (float)ch / pic.height;
     uv[4] = (cx + 0.5f) / pic.width; uv[5] = (cy + 0.5f) / pic.height; uv[6] = (cx + cw - 0.5f) / pic.width; uv[7] = (cy + ch - 0.5f) / pic.height;
+    uv[8]=1;
+#if TARGET_OS_OSX
+    if(dst.pixelFormat==MTLPixelFormatRGBA16Float && front_hdr_headroom)uv[8]=front_hdr_headroom();
+#endif
     [args setAddress:g_present_uv[uv_i].gpuAddress atIndex:0];
     [en setArgumentTable:args atStages:MTLRenderStageFragment];
-    [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
+    [en setViewport:vp]; [en setRenderPipelineState:hdr_on() && pic.pixelFormat==MTLPixelFormatRGBA16Float ? g_blit_hdr_pso : g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     MTLViewport ovp; float fuv[8];
+    [en setRenderPipelineState:g_blit_pso];
     if (fps_overlay_prepare(uv_i, vp, &ovp, fuv)) {   // argument-table bindings are captured per draw, so rebinding here leaves the game picture's draw intact
         memcpy(g_fps_uv[uv_i].contents, fuv, sizeof fuv);
         [args setTexture:g_fps_tex[uv_i].gpuResourceID atIndex:0];
@@ -13499,6 +13521,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     }
     PD("X ser=%llu%s", t->serial, interp >= 0 ? " (MetalFX interpolated frame before it)" : "");
     id<MTLTexture> src = interp >= 0 ? mfx_output(interp) : tex_mtl(t);   // TOTK_MFX: the interpolated frame shown one tick before this game frame
+    if (interp<0) { id<MTLTexture> linear=hdr_swap_texture(t->serial,frame);if(linear)src=linear; }
     if (!src) { RED_ONCE(8, "出图贴图建不出 MTLTexture"); return 0; }
     if (interp < 0) anom_present(src, frame);   // TOTK_ANOMALY
     /* One-frame temporal fallback (TOTK_FLASH_GUARD=1, off by default): a same-queue readback of the picture's centre
@@ -13687,15 +13710,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
     if (!present_encode_m4(cb, src, dr.texture, interp >= 0 ? NULL : crop, alloc_i)) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; if (grab) grab(NULL); return 0; }   // the interpolated frame has the canvas size: no swapchain crop
+    BOOL grab_hdr=dr.texture.pixelFormat==MTLPixelFormatRGBA16Float;
+    size_t grab_bpp=grab_hdr?8:4;
     id<MTLBuffer> grab_buf = nil; size_t grab_w = dr.texture.width, grab_h = dr.texture.height;
     if (grab) {
-        grab_buf = grab_w && grab_h ? [g_dev newBufferWithLength:grab_w * grab_h * 4 options:MTLResourceStorageModeShared] : nil;
+        grab_buf = grab_w && grab_h ? [g_dev newBufferWithLength:grab_w * grab_h * grab_bpp options:MTLResourceStorageModeShared] : nil;
         if (grab_buf) {
             res_add(grab_buf); res_commit();   // resident before this command buffer runs (lesson 55)
             id<MTL4ComputeCommandEncoder> ge = [cb computeCommandEncoder];
             [ge barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
             [ge copyFromTexture:dr.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(grab_w, grab_h, 1)
-                       toBuffer:grab_buf destinationOffset:0 destinationBytesPerRow:grab_w * 4 destinationBytesPerImage:grab_w * grab_h * 4];
+                       toBuffer:grab_buf destinationOffset:0 destinationBytesPerRow:grab_w * grab_bpp destinationBytesPerImage:grab_w * grab_h * grab_bpp];
             m4_end(ge);
         } else { MLOG("【红】整窗截图：%zux%zu 读回缓冲建不出", grab_w, grab_h); grab(NULL); grab = nil; }
     }
@@ -13740,8 +13765,23 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (grab) { void (^g)(CGImageRef) = grab; id<MTLBuffer> buf = grab_buf; size_t w = grab_w, h = grab_h;
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
             CGImageRef img = NULL; CGContextRef ctx = NULL; CGColorSpaceRef cs = NULL;
+            NSMutableData *sdr=nil;
             if (!f.error) { cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-                ctx = CGBitmapContextCreate(buf.contents, w, h, 8, w * 4, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+                const void *pixels=buf.contents;
+                if(grab_hdr){
+                    sdr=[NSMutableData dataWithLength:w*h*4];uint8_t *q=sdr.mutableBytes;const __fp16 *v=buf.contents;
+                    float peak=0;size_t bright=0,bad=0;
+                    for(size_t i=0;i<w*h;i++){
+                        float c[3];for(int j=0;j<3;j++){c[j]=(float)v[i*4+j];if(!isfinite(c[j])){bad++;c[j]=0;}c[j]=fmaxf(c[j],0);}
+                        float p=fmaxf(c[0],fmaxf(c[1],c[2]));peak=fmaxf(peak,p);bright+=p>1.001f;
+                        float gain=p>1?1/p:1;
+                        for(int j=0;j<3;j++){float x=c[j]*gain;float e=x<=0.0031308f?12.92f*x:1.055f*powf(x,1/2.4f)-0.055f;q[i*4+2-j]=(uint8_t)lrintf(fminf(fmaxf(e,0),1)*255);}
+                        q[i*4+3]=255;
+                    }
+                    MLOG("[hdr] drawable readback: peak %.4f SDR-white units; %zu/%zu pixels above white; nonfinite %zu",peak,bright,w*h,bad);
+                    pixels=sdr.bytes;
+                }
+                ctx = CGBitmapContextCreate((void *)pixels, w, h, 8, w * 4, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
                 img = ctx ? CGBitmapContextCreateImage(ctx) : NULL; }
             g(img);
             if (img) CGImageRelease(img); if (ctx) CGContextRelease(ctx); if (cs) CGColorSpaceRelease(cs);
@@ -14080,6 +14120,7 @@ static int mfx_present_frame(const tex_t *t, double period, int discard) {
     @autoreleasepool { return mfx_present_frame_body(t, period, discard); }
 }
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
+    hdr_note_swap(t);
     taa_frame_end();   // TOTK_TAA: next frame's jitter, this frame's depth and camera forgotten (also while off: key 5)
     int discard = atomic_load(&g_present_discard), islot = mfx_enabled() && t ? mfx_present_frame(t, period, discard) : -1;
     if (mfx_latch() && !mfx_enabled()) { g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0; BOTW_MFX_FRAME_RESET() }   // key 2 / flag mfx_interp: the next frame is fully on or off

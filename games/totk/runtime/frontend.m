@@ -9,11 +9,23 @@
 #include "game_version.h"
 #include "totk_ui_lang.h"
 #include "gamepad_layout.h"
+#include "../third_party/d2r_gfx/gfx/nvn/totk_hdr.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
 int mfxup_output_enabled(void);
 static NSWindow *window;
 uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented so far */
 static CAMetalLayer *metalLayer;
+static _Atomic float hdrHeadroom=1;
+float front_hdr_headroom(void){return atomic_load_explicit(&hdrHeadroom,memory_order_relaxed);}
+static void front_hdr_update(void){
+ if(!totk_hdr_requested())return;
+ NSScreen *screen=window.screen?:NSScreen.mainScreen;
+ float h=screen?(float)screen.maximumExtendedDynamicRangeColorComponentValue:1;
+ if(!isfinite(h)||h<1)h=1;
+ float old=atomic_exchange(&hdrHeadroom,h);
+ if(fabsf(old-h)>0.05f)fprintf(stderr,"[hdr] display %s: current headroom %.3f, potential %.3f (SDR white = 1)\n",screen.localizedName.UTF8String,h,(double)screen.maximumPotentialExtendedDynamicRangeColorComponentValue);
+}
+
 static NSView *bootOverlay;
 static NSTextField *bootStage,*bootDetail;
 static NSProgressIndicator *bootProgress;
@@ -333,7 +345,8 @@ static _Atomic int windowVisible=-1;   /* -1 not known yet; read by the present 
 static void note_occlusion(const char *when){int v=(window.occlusionState&NSWindowOcclusionStateVisible)!=0;atomic_store(&windowVisible,v);
  fprintf(stderr,"[totk] window %s%s (frame %llu)\n",v?"visible":"covered (or on another Space): no presents until it is visible again",when,(unsigned long long)dm_nvn_frame_count());}
 -(void)windowDidChangeOcclusionState:(NSNotification *)n{(void)n;note_occlusion("");}
--(void)windowDidChangeBackingProperties:(NSNotification *)n{(void)n;front_sync_drawable();}
+-(void)windowDidChangeBackingProperties:(NSNotification *)n{(void)n;front_sync_drawable();front_hdr_update();}
+-(void)windowDidChangeScreen:(NSNotification *)n{(void)n;front_hdr_update();}
 @end
 static TOTKWindowDelegate *windowDelegate;
 int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
@@ -367,7 +380,15 @@ void runtime_front_run(void(*callback)(void)){
   front_install_menu();
   window.collectionBehavior|=NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];
-  metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
+  metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;if(totk_hdr_requested()){
+   metalLayer.pixelFormat=MTLPixelFormatRGBA16Float;
+   CGColorSpaceRef cs=CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);metalLayer.colorspace=cs;CGColorSpaceRelease(cs);
+   metalLayer.wantsExtendedDynamicRangeContent=YES;
+   window.title=[window.title stringByAppendingString:@" — HDR test"];
+   front_hdr_update();
+   [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){(void)timer;front_hdr_update();}];
+   fprintf(stderr,"[hdr] EDR enabled: RGBA16Float, extended linear sRGB; scene-guided highlights, UI white = 1\n");
+  }metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
   metalLayer.framebufferOnly=NO;window.contentView.wantsLayer=YES;window.contentView.layer=metalLayer;
   bootOverlay=[[NSView alloc] initWithFrame:window.contentView.bounds];bootOverlay.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
   bootOverlay.wantsLayer=YES;bootOverlay.layer.backgroundColor=[NSColor colorWithCalibratedRed:0.035 green:0.075 blue:0.09 alpha:1].CGColor;
