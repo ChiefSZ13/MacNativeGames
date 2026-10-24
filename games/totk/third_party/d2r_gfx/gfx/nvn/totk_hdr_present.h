@@ -1,6 +1,6 @@
 #pragma once
 /* Production presentation shaders, also used by the HDR GPU probe. */
-static NSString *totk_hdr_present_source(MTLPixelFormat format){
+static NSString *totk_hdr_present_source(MTLPixelFormat format, BOOL hdrAvailable){
         static const char *src_msl =
             "#include <metal_stdlib>\nusing namespace metal;\n"
             "struct V { float4 p [[position]]; float2 uv; };\n"
@@ -8,6 +8,7 @@ static NSString *totk_hdr_present_source(MTLPixelFormat format){
             "struct Crop { float4 rect; float4 edge; };\n"
             "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
         NSString *source=@(src_msl);
+        if(!hdrAvailable)return source;   /* ordinary SDR keeps the upstream shader unchanged */
         BOOL edr=format==MTLPixelFormatRGBA16Float;
         NSString *helpers=@"float3 hdr_decode(float3 c){return select(c/12.92,pow((max(c,float3(0))+0.055)/1.055,float3(2.4)),c>0.04045);}\nfloat3 hdr_encode(float3 c){return select(c*12.92,1.055*pow(max(c,float3(0)),float3(1.0/2.4))-0.055,c>0.0031308);}\nfloat3 hdr_fit(float3 c,float h){c=select(max(c,float3(0)),float3(0),!isfinite(c));h=max(h,1.0);float p=max(c.r,max(c.g,c.b));if(p<=1)return c;if(h<=1)return c/p;float k=max(1.0,0.75*h);float q=p<=k?p:k+(h-k)*(1-exp(-(p-k)/(h-k)));return c*(q/p);}\n";
         source=[source stringByReplacingOccurrencesOfString:@"struct Crop" withString:[helpers stringByAppendingString:@"struct Crop"]];

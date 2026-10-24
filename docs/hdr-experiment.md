@@ -49,7 +49,9 @@ The shortcut regression probe exercises production key-8 dispatch, held-key repe
 
 The live-control compose probe verifies disabled output is byte-identical to the original SDR shader before and after enabling HDR; the synthetic highlight reaches 3.4492 in the HDR case. Unknown or already patched source is rejected.
 
-Initial probe: 8,223 checks passed with Metal API Validation. The full repository suite passed 332 Python tests plus its C checks, including portable reference-white/headroom invariants.
+The presentation probe also checks all byte values across RGBA channels with the original SDR shader and compiler defaults, and verifies that the ordinary SDR library contains no HDR entry point. HDR helpers, safe math settings and the extra presentation pipeline are confined to opt-in launches.
+
+Initial probe: 8,223 checks passed with Metal API Validation; the final SDR isolation regression adds 1,025 checks. The full repository suite passed 332 Python tests plus its C checks, including portable reference-white/headroom invariants.
 
 Copied-save outdoor gameplay completed with HDR on, HDR off, and HDR plus MetalFX spatial/output upscaling. Native RGBA16F drawable readback measured peak values of 1.9131 SDR-white units (HDR) and 2.8203 (HDR + MetalFX), with 3,751 and 8,809 pixels above white respectively and no nonfinite components. MetalFX output upscaling from 1920×1080 to 3024×1700 measured about 1.17 ms median / 1.26 ms p95 GPU time in a short fixed-camera test; this is not a broad performance benchmark. All three sessions exited cleanly.
 
