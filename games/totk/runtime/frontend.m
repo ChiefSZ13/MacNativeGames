@@ -17,7 +17,6 @@ uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented
 static CAMetalLayer *metalLayer;
 static _Atomic float hdrHeadroom=1;
 static _Atomic int hdrEnabled;
-static NSMenuItem *hdrMenuItem;
 static NSUserDefaults *hdrPreferences;
 int front_hdr_enabled(void){return atomic_load(&hdrEnabled);}
 
@@ -37,18 +36,12 @@ static void front_hdr_apply(int enabled){
  atomic_store(&hdrEnabled,!!enabled);
  [hdrPreferences setBool:!!enabled forKey:@"EDREnabled"];
  metalLayer.wantsExtendedDynamicRangeContent=!!enabled;
- hdrMenuItem.state=enabled?NSControlStateValueOn:NSControlStateValueOff;
  front_hdr_update();
- fprintf(stderr,"[hdr] EDR %s; menu checked=%d, display headroom %.3f\n",enabled?"on":"off",hdrMenuItem.state==NSControlStateValueOn,front_hdr_headroom());
+ fprintf(stderr,"[hdr] EDR %s (key 8); display headroom %.3f\n",enabled?"on":"off",front_hdr_headroom());
 }
-@interface TOTKHDRControl : NSObject
--(void)toggle:(id)sender;
-@end
-@implementation TOTKHDRControl
--(void)toggle:(id)sender{(void)sender;front_hdr_apply(!front_hdr_enabled());}
-@end
-static TOTKHDRControl *hdrControl;
 void runtime_front_hdr_set(int enabled){dispatch_async(dispatch_get_main_queue(), ^{front_hdr_apply(enabled);});}
+/* Read the current state on the main queue: consecutive key presses must each toggle once. */
+void runtime_front_hdr_toggle(void){dispatch_async(dispatch_get_main_queue(), ^{front_hdr_apply(!front_hdr_enabled());});}
 
 static NSView *bootOverlay;
 static NSTextField *bootStage,*bootDetail;
@@ -240,9 +233,11 @@ static NSString *shortcut_text(void){
  NSString *ratio=!ar?@"16:9":fabsf(ar*9-21)<0.05f?@"21:9":[NSString stringWithFormat:@"%.2f:1",ar];
  NSString *shape=step==1?[NSString stringWithFormat:@(TOTK_UI("适配窗口 %@","fit to window %@")),ratio]:step==2?ratio:@"16:9";
  if(step<0)shape=@(TOTK_UI("本游戏暂不支持","not available in this game"));   /* runtime_aspect_step -1: this game version has no aspect sites */
- return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  提示：全部 → 只显示 FPS → 隐藏\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  画面比例：当前 %@（按键切换）\n5  边缘平滑（MetalFX 时间性）：%@\n6  手柄类型：当前 %@（按键切换）\n7  鼠标操作：当前 %@（按键切换）","Shortcuts\n1  Overlays: all → FPS only → off\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Aspect ratio: %@ (current; press to cycle)\n5  Edge smoothing (MetalFX Temporal): %@\n6  Controller type: %@ (current; press to cycle)\n7  Mouse: %@ (current; press to switch)")),[NSString stringWithUTF8String:interp],picture,shape,
+ NSString *text=[NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  提示：全部 → 只显示 FPS → 隐藏\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  画面比例：当前 %@（按键切换）\n5  边缘平滑（MetalFX 时间性）：%@\n6  手柄类型：当前 %@（按键切换）\n7  鼠标操作：当前 %@（按键切换）","Shortcuts\n1  Overlays: all → FPS only → off\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Aspect ratio: %@ (current; press to cycle)\n5  Edge smoothing (MetalFX Temporal): %@\n6  Controller type: %@ (current; press to cycle)\n7  Mouse: %@ (current; press to switch)")),[NSString stringWithUTF8String:interp],picture,shape,
   taa_enabled()?(taa_effective()?@(TOTK_UI("开","on")):@(TOTK_UI("开（未生效）","on (not in effect)"))):@(TOTK_UI("关","off")),pad_type_text(),
   runtime_mouse_enabled()?@(TOTK_UI("开（视角、按键，⌘Tab 释放指针）","on (camera, buttons; Command-Tab frees the pointer)")):@(TOTK_UI("关","off"))];
+ if(totk_hdr_available())text=[text stringByAppendingFormat:@(TOTK_UI("\n8  HDR / EDR：当前 %@（按键切换）","\n8  HDR / EDR: %@ (current; press to switch)")),front_hdr_enabled()?@(TOTK_UI("开","on")):@(TOTK_UI("关","off"))];
+ return text;
 }
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){int compact=hud_compact();self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:compact?0.72:0.86].CGColor;self.layer.cornerRadius=compact?7:14;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:compact?0.14:0.2].CGColor;
  self.label=[NSTextField labelWithString:shortcut_text()];self.label.font=[NSFont systemFontOfSize:17 weight:NSFontWeightMedium];self.label.textColor=NSColor.whiteColor;self.label.alignment=NSTextAlignmentCenter;self.label.maximumNumberOfLines=0;self.label.lineBreakMode=NSLineBreakByWordWrapping;self.label.frame=NSInsetRect(self.bounds,20,18);self.label.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[self addSubview:self.label];
@@ -382,13 +377,6 @@ static void front_install_menu(void){
  NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("退出 " GAME_NAME,"Quit " GAME_NAME)) action:@selector(performClose:) keyEquivalent:@"q"];
  quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
  [appMenu addItem:quit];
- if(totk_hdr_available()){
-  NSMenuItem *display=[NSMenuItem new];display.title=@"Display";display.submenu=[NSMenu new];[menu addItem:display];
-  hdrControl=[TOTKHDRControl new];
-  hdrMenuItem=[[NSMenuItem alloc] initWithTitle:@"HDR / EDR" action:@selector(toggle:) keyEquivalent:@""];
-  hdrMenuItem.target=hdrControl;hdrMenuItem.state=front_hdr_enabled()?NSControlStateValueOn:NSControlStateValueOff;
-  [display.submenu addItem:hdrMenuItem];
- }
  front_menubar_fps_add(menu);NSApp.mainMenu=menu;
 }
 static void *guest_main(void *callback){@autoreleasepool{((void(*)(void))callback)();}return NULL;}
