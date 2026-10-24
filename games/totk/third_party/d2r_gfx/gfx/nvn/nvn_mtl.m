@@ -26,7 +26,9 @@
 #include "totk_mfx_up.h"
 #include "totk_taa.h"
 #include "totk_hdr.h"
+#include "totk_hdr_compose.h"
 #include "totk_hdr_present.h"
+extern int front_hdr_enabled(void) __attribute__((weak_import));
 extern float front_hdr_headroom(void) __attribute__((weak_import));
 #include "totk_sysload.h"
 /* TOTK_MFX_UPSCALE: for the one compose draw that samples the smaller scene, the scene texture and its MetalFX upscale
@@ -1886,7 +1888,8 @@ static int ub_skip(const char *key) {   // 本相要不要丢掉这个片元着�
     for (int i = 0; i < g_ub_nk[uc]; i++) { const char *k = g_ub_keys[uc][i]; if (k[0] == '@') continue; if (k[0] == '*' || !strncmp(key, k, strlen(k))) return 1; }
     return 0;
 }
-void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); }
+static _Atomic int g_hdr_frame_enabled;
+void mtl_set_frame(uint64_t f) { atomic_store(&g_hdr_frame_enabled, front_hdr_enabled ? front_hdr_enabled() : totk_hdr_requested()); atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); }
 // GPU 计时登记：提交前 gpu_tag_begin(帧)，完成时 gpu_tag_done(帧, GPU 起, GPU 止)（CACurrentMediaTime 基准秒）。
 // 旧队列命令缓冲走 gpu_tag_f；Metal 4 主提交在 mtl_sub_commit 的 feedback 里回填（换 Metal 4 时调用点全丢，「计时」行的 GPU 一栏成了空）
 // GPU timing registration: gpu_tag_begin(frame) before commit, gpu_tag_done(frame, GPU start, GPU end) on completion (seconds on the CACurrentMediaTime base).
@@ -4803,7 +4806,7 @@ static void shmap_load(void) {
     id peer[4]; NSString *key[4]; id<MTLFunction> fn[4]; int mode[4]; unsigned next;
 } @end
 @implementation NvFunctionCache @end
-@interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, writes_depth, lay_ok; uint8_t drv_scanned[3];   /* drv_scanned (TOTK): driver segment c0 / c2 reads found by drv_scan in the MSL but missing from the reflection json */ /* lay_ok (TOTK): vertex MSL can write the layer (1) or not (-1), 0 = not checked yet; writes_depth (TOTK): the fragment function has a [[depth(...)]] output, so its pipeline needs a depth attachment */ const char *builtin; uint64_t logged; char key[80]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+@interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, writes_depth, lay_ok, hdr_compose; uint8_t drv_scanned[3];   /* drv_scanned (TOTK): driver segment c0 / c2 reads found by drv_scan in the MSL but missing from the reflection json */ /* lay_ok (TOTK): vertex MSL can write the layer (1) or not (-1), 0 = not checked yet; writes_depth (TOTK): the fragment function has a [[depth(...)]] output, so its pipeline needs a depth attachment */ const char *builtin; uint64_t logged; char key[80]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint16_t texture_slots[NVN_REFL_MAXB]; uint8_t texture_count, texture_plan_ready;
     // 上次编好的参数缓冲
     // The argument buffer encoded last time
@@ -5259,16 +5262,12 @@ static NvShader *shader_load(NSString *pc, int stage) {
        them in memory (the Mac's behaviour before). */
     static int keep_src = -1; if (keep_src < 0) { const char *e = getenv("TOTK_KEEP_MSL"); keep_src = e && !strcmp(e, "1"); }
     if (keep_src) o->src = full;
-    if (totk_hdr_requested() && stage==1 && [pc hasPrefix:@"0ac9a54938974396134d911dc0f29c79ce43e3d8cd50b11ee8b85a48ead6d2a5-"]) {
-        NSString *anchor=@"    out.m_34.w = 0.0;";
-        if ([full containsString:anchor] && [full containsString:@"float _69 = _63 + _57;"] &&
-            [full containsString:@"float _71 = _65 + _59;"] && [full containsString:@"float _73 = _67 + _61;"]) {
-            /* Preserve the authored SDR color treatment and diffuse range. Only
-             * the original, exposed scene luminance opens the highlight shoulder. */
-            NSString *body=@"    float hdr_y = max(dot(max(float3(_69,_71,_73),float3(0)),float3(0.2126,0.7152,0.0722))-1.0,0.0);\n    float hdr_gain = 1.0 + 2.5 * hdr_y / (hdr_y + 2.0);\n    out.m_34.xyz = max(out.m_34.xyz,float3(0)) * hdr_gain;\n";
-            NSString *modified=[full stringByReplacingOccurrencesOfString:anchor withString:[body stringByAppendingString:anchor]];
+    if (totk_hdr_available() && stage==1 && [pc hasPrefix:@TOTK_HDR_COMPOSE_KEY]) {
+        NSString *modified=totk_hdr_compose_source(full);
+        if(modified) {
             NSError *err=nil;id<MTLLibrary> hl=totk_msl_library(modified,&err);
-            if(hl){o->fn=[hl newFunctionWithName:j[@"entry"]];o->src=modified;MLOG("[hdr] scene-guided highlight shoulder enabled; SDR diffuse/UI white = 1");}
+            id<MTLFunction> hf=hl?[hl newFunctionWithName:j[@"entry"]]:nil;
+            if(hf){o->fn=hf;o->src=modified;o->hdr_compose=1;MLOG("[hdr] live compose control ready; SDR diffuse/UI white = 1");}
             else MLOG("[hdr] compose variant failed; keeping SDR shader: %s",err.localizedDescription.UTF8String);
         } else MLOG("[hdr] compose source layout unknown; keeping SDR shader");
     }
@@ -8318,6 +8317,12 @@ static int tex_slots_diagnostics(void) {
     return active;
 }
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
+    if(nvn_stage==1 && sh->hdr_compose) {
+        /* Immutable arena bytes survive queued rendering; never overwrite an in-flight mode. */
+        id<MTLBuffer> b=nil;size_t off=arena_alloc(16,&b);
+        *(float *)((char *)b.contents+off)=atomic_load(&g_hdr_frame_enabled)?1.0f:0.0f;
+        enc_r_args((id<MTL4RenderCommandEncoder>)en,MTLRenderStageFragment,b.gpuAddress+off,30);
+    }
     if (!sh->ae) return 1;
     if (nvn_stage == 1 && !strncmp(sh->key, "0ac9a54938974396", 16) && getenv("DM_NVN_FLASHHDR") && R.rt.n && R.rt.color[0])
         g_flash_tonemap_target = tex_mtl(R.rt.color[0]);

@@ -24,7 +24,7 @@ Build the Mac app with `build_app.py` as usual, then launch it with:
 open -n --env TOTK_HDR=1 '/path/to/Tears of the Kingdom HDR.app'
 ```
 
-Launch with `TOTK_HDR=0` for SDR. Restart to change modes: the game shader variant and layer format are selected at startup. The native launcher separates HDR's pipeline cache with an `-hdr1` suffix. Shader source and game data are not modified. The local experimental app can carry `LSEnvironment.TOTK_HDR=1` in its signed Info.plist so Finder enables HDR; this is an artifact configuration, not the default of the source tree.
+Use `TOTK_HDR_CONTROL=1` to enable **Display → HDR / EDR**, a live checkbox in the macOS menu bar. It remembers the last choice in the dedicated `org.macnativegames.totk.hdr-test` preferences suite (first launch defaults to on). Explicit `TOTK_HDR=0` or `1` overrides the initial choice for diagnostics. Turning EDR off executes the original compose shader math and presents the SDR swapchain; turning it back on restores the float canvas. The layer stays extended linear sRGB / RGBA16F to avoid changing surface formats while frames are queued. EDR display opt-in and effective headroom follow the switch. Mode is latched per render frame and bound as immutable GPU uniform data. The native launcher separates HDR's pipeline cache with an `-hdr1` suffix whenever EDR control is available, including while the checkbox is off. Test profiles and warmed shader caches are retained. Shader source and game data are not modified. The local experimental app can carry `LSEnvironment.TOTK_HDR_CONTROL=1` in its signed Info.plist so Finder exposes the control; this is an artifact configuration, not the default of the source tree.
 
 `wshot` reads float drawables with an appropriately sized buffer, reports peak values/pixels above SDR white, and produces an SDR preview. That PNG is not an HDR brightness reference. There is no per-frame CPU pixel readback in ordinary play.
 
@@ -38,7 +38,16 @@ clang -fobjc-arc -O2 -Wall -Wextra -Werror \
   games/totk/tests/hdr/probe.m -framework Cocoa -framework Metal -o /tmp/totk-hdr-probe
 MTL_DEBUG_LAYER=1 /tmp/totk-hdr-probe
 make check
+# Optional: exercise the exact compose MSL extracted from your own game.
+clang -fobjc-arc -O2 -Wall -Wextra -Werror \
+  -I games/totk/third_party/d2r_gfx/gfx/nvn \
+  games/totk/tests/hdr/compose-probe.m -framework Foundation -framework Metal -o /tmp/totk-hdr-compose-probe
+MTL_DEBUG_LAYER=1 /tmp/totk-hdr-compose-probe /path/to/owned-compose.metal
 ```
+
+The live checkbox was exercised through the macOS menu, and off persisted across a LaunchServices relaunch. In one copied-save gameplay process, drawable peaks were 3.3633 with EDR on, 1.0000 with EDR off (zero pixels above white), and 3.3867 after re-enabling, with no nonfinite components. Both the normal profile and the existing HDR test profile remained byte-for-byte unchanged.
+
+The live-control compose probe verifies disabled output is byte-identical to the original SDR shader before and after enabling HDR; the synthetic highlight reaches 3.4492 in the HDR case. Unknown or already patched source is rejected.
 
 Initial probe: 8,223 checks passed with Metal API Validation. The full repository suite passed 332 Python tests plus its C checks, including portable reference-white/headroom invariants.
 

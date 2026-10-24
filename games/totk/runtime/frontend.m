@@ -16,15 +16,39 @@ static NSWindow *window;
 uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented so far */
 static CAMetalLayer *metalLayer;
 static _Atomic float hdrHeadroom=1;
+static _Atomic int hdrEnabled;
+static NSMenuItem *hdrMenuItem;
+static NSUserDefaults *hdrPreferences;
+int front_hdr_enabled(void){return atomic_load(&hdrEnabled);}
+
 float front_hdr_headroom(void){return atomic_load_explicit(&hdrHeadroom,memory_order_relaxed);}
 static void front_hdr_update(void){
- if(!totk_hdr_requested())return;
+ if(!totk_hdr_available())return;
  NSScreen *screen=window.screen?:NSScreen.mainScreen;
- float h=screen?(float)screen.maximumExtendedDynamicRangeColorComponentValue:1;
+ float h=front_hdr_enabled() && screen?(float)screen.maximumExtendedDynamicRangeColorComponentValue:1;
  if(!isfinite(h)||h<1)h=1;
  float old=atomic_exchange(&hdrHeadroom,h);
  if(fabsf(old-h)>0.05f)fprintf(stderr,"[hdr] display %s: current headroom %.3f, potential %.3f (SDR white = 1)\n",screen.localizedName.UTF8String,h,(double)screen.maximumPotentialExtendedDynamicRangeColorComponentValue);
 }
+
+/* Main thread only: keep the float surface stable while changing EDR and scene grading. */
+static void front_hdr_apply(int enabled){
+ if(!totk_hdr_available())return;
+ atomic_store(&hdrEnabled,!!enabled);
+ [hdrPreferences setBool:!!enabled forKey:@"EDREnabled"];
+ metalLayer.wantsExtendedDynamicRangeContent=!!enabled;
+ hdrMenuItem.state=enabled?NSControlStateValueOn:NSControlStateValueOff;
+ front_hdr_update();
+ fprintf(stderr,"[hdr] EDR %s; menu checked=%d, display headroom %.3f\n",enabled?"on":"off",hdrMenuItem.state==NSControlStateValueOn,front_hdr_headroom());
+}
+@interface TOTKHDRControl : NSObject
+-(void)toggle:(id)sender;
+@end
+@implementation TOTKHDRControl
+-(void)toggle:(id)sender{(void)sender;front_hdr_apply(!front_hdr_enabled());}
+@end
+static TOTKHDRControl *hdrControl;
+void runtime_front_hdr_set(int enabled){dispatch_async(dispatch_get_main_queue(), ^{front_hdr_apply(enabled);});}
 
 static NSView *bootOverlay;
 static NSTextField *bootStage,*bootDetail;
@@ -357,7 +381,15 @@ static void front_install_menu(void){
  NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[menu addItem:appItem];
  NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("退出 " GAME_NAME,"Quit " GAME_NAME)) action:@selector(performClose:) keyEquivalent:@"q"];
  quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
- [appMenu addItem:quit];front_menubar_fps_add(menu);NSApp.mainMenu=menu;
+ [appMenu addItem:quit];
+ if(totk_hdr_available()){
+  NSMenuItem *display=[NSMenuItem new];display.title=@"Display";display.submenu=[NSMenu new];[menu addItem:display];
+  hdrControl=[TOTKHDRControl new];
+  hdrMenuItem=[[NSMenuItem alloc] initWithTitle:@"HDR / EDR" action:@selector(toggle:) keyEquivalent:@""];
+  hdrMenuItem.target=hdrControl;hdrMenuItem.state=front_hdr_enabled()?NSControlStateValueOn:NSControlStateValueOff;
+  [display.submenu addItem:hdrMenuItem];
+ }
+ front_menubar_fps_add(menu);NSApp.mainMenu=menu;
 }
 static void *guest_main(void *callback){@autoreleasepool{((void(*)(void))callback)();}return NULL;}
 void runtime_front_run(void(*callback)(void)){
@@ -377,17 +409,23 @@ void runtime_front_run(void(*callback)(void)){
   const char *owner=getenv("TOTK_SLOT_OWNER"),*purpose=getenv("TOTK_SLOT_PURPOSE");
   window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@(TOTK_UI("测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭","Test session (%s) Ver. %s: %s — save copy, progress is not saved to your save, the script closes it")),owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:TOTK_UI("代理测试","agent test")]:[NSString stringWithFormat:@GAME_NAME "  Mac — Ver. %s",TOTK_GAME_VERSION];
   windowDelegate=[TOTKWindowDelegate new];window.delegate=windowDelegate;
+  if(totk_hdr_available()){
+   hdrPreferences=[[NSUserDefaults alloc] initWithSuiteName:@"org.macnativegames.totk.hdr-test"];
+   const char *e=getenv("TOTK_HDR");
+   id saved=[hdrPreferences objectForKey:@"EDREnabled"];
+   atomic_store(&hdrEnabled,e?totk_hdr_requested():(saved?[saved boolValue]:1));
+  }
   front_install_menu();
   window.collectionBehavior|=NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];
-  metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;if(totk_hdr_requested()){
+  metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;if(totk_hdr_available()){
    metalLayer.pixelFormat=MTLPixelFormatRGBA16Float;
    CGColorSpaceRef cs=CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);metalLayer.colorspace=cs;CGColorSpaceRelease(cs);
-   metalLayer.wantsExtendedDynamicRangeContent=YES;
+   metalLayer.wantsExtendedDynamicRangeContent=front_hdr_enabled();
    window.title=[window.title stringByAppendingString:@" — HDR test"];
-   front_hdr_update();
+   front_hdr_apply(front_hdr_enabled());
    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){(void)timer;front_hdr_update();}];
-   fprintf(stderr,"[hdr] EDR enabled: RGBA16Float, extended linear sRGB; scene-guided highlights, UI white = 1\n");
+   fprintf(stderr,"[hdr] live EDR control: RGBA16Float, extended linear sRGB; scene-guided highlights, UI white = 1\n");
   }metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
   metalLayer.framebufferOnly=NO;window.contentView.wantsLayer=YES;window.contentView.layer=metalLayer;
   bootOverlay=[[NSView alloc] initWithFrame:window.contentView.bounds];bootOverlay.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;

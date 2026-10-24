@@ -19,6 +19,15 @@ static inline int totk_hdr_requested(void) {
     return 0;
 #endif
 }
+/* Capability stays on across live mode changes, keeping shader/cache formats stable. */
+static inline int totk_hdr_available(void) {
+#if defined(__APPLE__) && TARGET_OS_OSX && !defined(GAME_BOTW)
+    const char *e=getenv("TOTK_HDR_CONTROL");
+    return totk_hdr_requested() || (e && !strcmp(e,"1"));
+#else
+    return 0;
+#endif
+}
 static inline float totk_hdr_rolloff(float peak, float headroom) {
     if (!isfinite(peak) || peak < 0) return 0;
     if (!isfinite(headroom) || headroom < 1) headroom = 1;

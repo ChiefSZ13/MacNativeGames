@@ -4,7 +4,7 @@ static struct { uint64_t serial, frame; id<MTLTexture> texture; } g_hdr_swap[8];
 static unsigned g_hdr_nswap;
 static int hdr_on(void) {
 #if TARGET_OS_OSX && !defined(GAME_BOTW)
-    return totk_hdr_requested();
+    return totk_hdr_available();
 #else
     return 0;
 #endif
@@ -26,7 +26,7 @@ static id<MTLTexture> hdr_swap_texture(uint64_t serial, uint64_t frame) {
 /* Preserve the float canvas before the exact final copy writes to the 8-bit
  * sRGB swapchain. Never promote arbitrary guest textures or their CPU storage. */
 static void hdr_capture(NvProg *pr) {
-    if(!hdr_on() || !pr || !pr->sh[0] || !pr->sh[1] || R.rt.n!=1 || !R.rt.color[0])return;
+    if(!hdr_on() || !atomic_load(&g_hdr_frame_enabled) || !pr || !pr->sh[0] || !pr->sh[1] || R.rt.n!=1 || !R.rt.color[0])return;
     if(strncmp(pr->sh[1]->key,"dd3d1e0ebf73242845970b5655fac199a30f5acf747975c5e771caa49af8b12b-",65) ||
        strncmp(pr->sh[0]->key,"1a40e5f5ff257e13293c01b8e293a619d2ae8cdcffd8e4083e04dd7f59fd2273-",65))return;
     unsigned slot=8;pthread_mutex_lock(&g_hdr_mu);
