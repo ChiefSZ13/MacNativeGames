@@ -14502,8 +14502,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if(totk_hdr_available() && front_hdr_present_mode){
         MTLPixelFormat want=hdrFrame?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm;
         if(layer.pixelFormat!=want){mtl_finish_gpu();front_hdr_present_mode(hdrFrame);}
-        /* DisplayLink may have acquired its drawable before the mode switch. */
-        if(supplied && supplied.texture.pixelFormat!=want){[g_q4 waitForDrawable:supplied];[g_q4 signalDrawable:supplied];supplied=nil;}
+        /* DisplayLink may have acquired its drawable before the mode switch. Drop
+         * this tick: nextDrawable is forbidden while its display link is active. */
+        if(supplied && supplied.texture.pixelFormat!=want){[g_q4 waitForDrawable:supplied];[g_q4 signalDrawable:supplied];return 0;}
     }
 #else
     (void)hdrFrame;
