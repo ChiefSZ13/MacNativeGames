@@ -29,23 +29,16 @@ static void user_input(const char *what){
  fprintf(stderr,"[input] user input (%s)%s%s\n",what,agent?": the user is playing this test session of ":"",agent?owner:"");
 }
 /* Keys from the window are the user's; scripted and auto-load presses use the synthetic entry.
-   Key 1 toggles the shortcut reminder in frontend.m. Key 2 (Mac key code 19) cycles MetalFX frame interpolation:
-   off -> 30+30 -> half the refresh rate -> uncapped (totk_mfx.m). Key 3 (key code 20) cycles 2K modes:
-   MetalFX 2K -> native 2K -> off (runtime_output_mode_cycle). Key 6 (key code 22) cycles the controller type: auto -> Xbox ->
-   PlayStation -> Switch (runtime_gamepad_type_cycle, gamepad.m). Key 7 (key code 26) turns mouse mode on / off
-   (runtime_mouse_toggle, gamepad.m; the window holds the pointer: frontend.m). Key 8 (key code 28) toggles experimental Mac HDR / EDR when enabled at launch.
-   Held-key repeats do not cycle. */
-enum { KEY_INTERP_TOGGLE = 19, KEY_OUTPUT_MODE_CYCLE = 20, KEY_ASPECT_TOGGLE = 21, KEY_PAD_TYPE_CYCLE = 22, KEY_TAA_TOGGLE = 23, KEY_MOUSE_TOGGLE = 26, KEY_HDR_TOGGLE = 28 };   /* 21: key 4, 16:9 -> fit to the window -> 21:9 (aspect_patch.h); 22: key 6; 23: key 5, MetalFX temporal anti-aliasing (totk_taa.m) */
+   Key 1 (Mac key code 18) opens and closes the settings panel (frontend.m: overlay, frame interpolation, picture, aspect
+   ratio, edge smoothing, controller type, mouse); held-key repeats do not toggle it. Keys 2-7 are no shortcuts any more
+   (user 2026-10-25: the panel replaces them). */
+enum { KEY_SETTINGS = 18, KEY_HDR = 28, KEY_FRAME_LOCK = 25 };
 void runtime_input_key_synthetic(unsigned code,int down){if(code>=128)return;pthread_mutex_lock(&inputLock);int press=down&&!keys[code];if(down&&!keys[code])pending|=button(code);keys[code]=(unsigned char)!!down;pthread_mutex_unlock(&inputLock);
- if(press&&code==18){extern void runtime_shortcut_help_toggle(void);runtime_shortcut_help_toggle();}
- if(press&&code==KEY_INTERP_TOGGLE){extern void dm_gfx_set_flag(const char *name,int v);dm_gfx_set_flag("mfx_interp",-1);}
- if(press&&code==KEY_OUTPUT_MODE_CYCLE)runtime_output_mode_cycle();
- if(press&&code==KEY_ASPECT_TOGGLE)runtime_aspect_toggle();
- if(press&&code==KEY_TAA_TOGGLE){extern void taa_toggle(void);taa_toggle();}
- if(press&&code==KEY_PAD_TYPE_CYCLE)runtime_gamepad_type_cycle();
- if(press&&code==KEY_MOUSE_TOGGLE)runtime_mouse_toggle();
+ if(press&&code==KEY_SETTINGS)runtime_settings_toggle();
 #if TARGET_OS_OSX
- if(press&&code==KEY_HDR_TOGGLE)runtime_front_hdr_toggle();
+ if(press&&code==KEY_HDR)runtime_front_hdr_toggle();
+ if(press&&code==KEY_FRAME_LOCK){extern int nvn_fps_lock(void);extern void nvn_fps_lock_set(int fps);extern void dm_gfx_set_flag(const char *,int);
+  int old=nvn_fps_lock(),next=old==0?30:old==30?40:old==40?60:0;nvn_fps_lock_set(next);if(next)dm_gfx_set_flag("mfx_interp",0);}
 #endif
 }
 void runtime_input_key(unsigned code,int down){if(down&&code<128)user_input("keyboard");runtime_input_key_synthetic(code,down);}
