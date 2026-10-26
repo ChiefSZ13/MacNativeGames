@@ -35,7 +35,8 @@ static void front_hdr_update(void){
 
 /* Startup and control changes run on the main thread. The presenter applies the
  * surface format between frames, after draining old GPU work. Off is the original
- * BGRA8 surface and its original default color space; on preserves that unmanaged P3 appearance. */
+ * BGRA8 surface and its original default color space. The HDR canvas keeps sRGB
+ * primaries: a P3 label alone would reinterpret, rather than convert, its colors. */
 static void front_hdr_init(void){
  if(!totk_hdr_available()){atomic_store(&hdrEnabled,0);return;}
  char word[32]={0};int on=0;
@@ -49,7 +50,7 @@ void front_hdr_present_mode(int enabled){
  if(!hdrSDRRemembered){hdrSDRColorSpace=metalLayer.colorspace;if(hdrSDRColorSpace)CFRetain(hdrSDRColorSpace);hdrSDRRemembered=1;}
  BOOL on=!!enabled;MTLPixelFormat format=on?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm;
  if(metalLayer.pixelFormat==format && metalLayer.wantsExtendedDynamicRangeContent==on)return;
- CGColorSpaceRef cs=on?CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3):NULL;
+ CGColorSpaceRef cs=on?CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB):NULL;
  metalLayer.pixelFormat=format;metalLayer.colorspace=on?cs:hdrSDRColorSpace;metalLayer.wantsExtendedDynamicRangeContent=on;
  if(cs)CGColorSpaceRelease(cs);
  fprintf(stderr,"[hdr] surface %s: format %lu, color space %s\n",on?"on":"off",(unsigned long)format,metalLayer.colorspace?[(NSString *)CFBridgingRelease(CGColorSpaceCopyName(metalLayer.colorspace)) UTF8String]:"default");
@@ -399,7 +400,7 @@ void runtime_front_run(void(*callback)(void)){
   if(totk_hdr_available()){
    front_hdr_present_mode(front_hdr_enabled());front_hdr_update();
    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){(void)timer;front_hdr_update();}];
-   fprintf(stderr,"[hdr] TOTK 1.4.3 checked compose: EDR %s, HDR colorspace extended linear Display P3; off keeps upstream SDR\n",front_hdr_enabled()?"on":"off");
+   fprintf(stderr,"[hdr] TOTK 1.4.3 checked compose: EDR %s, HDR colorspace extended linear sRGB; off keeps upstream SDR\n",front_hdr_enabled()?"on":"off");
   }
   metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
   metalLayer.framebufferOnly=NO;window.contentView.wantsLayer=YES;window.contentView.layer=metalLayer;

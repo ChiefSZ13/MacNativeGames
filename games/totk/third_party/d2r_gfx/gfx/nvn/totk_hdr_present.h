@@ -1,5 +1,6 @@
 #pragma once
-/* Production presentation shaders, also used by the HDR GPU probe. */
+/* Production presentation shaders, also used by the HDR GPU probes.
+ * Linear output retains sRGB primaries, including values above SDR white. */
 static NSString *totk_hdr_present_source(MTLPixelFormat format, BOOL hdrAvailable){
         static const char *src_msl =
             "#include <metal_stdlib>\nusing namespace metal;\n"

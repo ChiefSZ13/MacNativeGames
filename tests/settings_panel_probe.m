@@ -133,7 +133,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         press(28);assert(front_hdr_enabled());front_hdr_present_mode(1);mfx_latch();
         assert(mfx_enabled()==MFX_OFF && mfx_requested()==MFX_40);
         assert(metalLayer.pixelFormat==MTLPixelFormatRGBA16Float && metalLayer.wantsExtendedDynamicRangeContent);
-        CGColorSpaceRef p3=CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3);assert(CFEqual(metalLayer.colorspace,p3));CGColorSpaceRelease(p3);
+        CGColorSpaceRef linearSRGB=CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);assert(CFEqual(metalLayer.colorspace,linearSRGB));CGColorSpaceRelease(linearSRGB);
         runtime_input_key_synthetic(28,1);runtime_input_key_synthetic(28,1);tick();runtime_input_key_synthetic(28,0);tick();
         assert(!front_hdr_enabled());front_hdr_present_mode(0);mfx_latch();
         assert(metalLayer.pixelFormat==MTLPixelFormatBGRA8Unorm && !metalLayer.wantsExtendedDynamicRangeContent && ((!original&&!metalLayer.colorspace)||(original&&metalLayer.colorspace&&CFEqual(original,metalLayer.colorspace))));
@@ -143,7 +143,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         setenv("TOTK_HDR","",1);snprintf(savedHDR,sizeof savedHDR,"on\n");front_hdr_init();assert(front_hdr_enabled());
         setenv("TOTK_HDR","0",1);front_hdr_init();assert(!front_hdr_enabled());mfx_latch();
         press(25);assert(nvn_fps_lock()==30);press(25);assert(nvn_fps_lock()==40);press(25);assert(nvn_fps_lock()==60);press(25);assert(nvn_fps_lock()==0);
-        puts("pass: HDR off restores SDR layer, P3 on, interpolation selection, hdr.txt, held keys and key 9");return 0;
+        puts("pass: HDR off restores SDR layer, linear sRGB on, interpolation selection, hdr.txt, held keys and key 9");return 0;
     }
 
     /* Overlay: all -> FPS only -> off; the corner box follows. */
