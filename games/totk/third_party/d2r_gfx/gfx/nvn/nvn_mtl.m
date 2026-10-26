@@ -13792,6 +13792,7 @@ static void present_pipeline(MTLPixelFormat format, BOOL hdrSource) {
     BOOL hdrAvailable=hdrSource || format==MTLPixelFormatRGBA16Float;
     if (!g_blit_pso || g_blit_fmt != format || g_blit_hdr_source!=hdrAvailable) {
         g_blit_hdr_source=hdrAvailable;g_blit_hdr_pso=nil;
+        if(getenv("TOTK_HDR") || getenv("TOTK_HDR_CONTROL"))MLOG("[hdr] presentation: format %lu, HDR shader %s, supported %d",(unsigned long)format,hdrAvailable?"on":"off",totk_hdr_available());
         NSString *source=totk_hdr_present_source(format,hdrAvailable);
         NSError *e = nil;
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:hdrAvailable?totk_precise_opts():nil error:&e];

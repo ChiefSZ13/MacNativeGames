@@ -52,6 +52,7 @@ void front_hdr_present_mode(int enabled){
  CGColorSpaceRef cs=on?CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3):NULL;
  metalLayer.pixelFormat=format;metalLayer.colorspace=on?cs:hdrSDRColorSpace;metalLayer.wantsExtendedDynamicRangeContent=on;
  if(cs)CGColorSpaceRelease(cs);
+ fprintf(stderr,"[hdr] surface %s: format %lu, color space %s\n",on?"on":"off",(unsigned long)format,metalLayer.colorspace?[(NSString *)CFBridgingRelease(CGColorSpaceCopyName(metalLayer.colorspace)) UTF8String]:"default");
 }
 static void front_hdr_apply(int enabled){
  if(!totk_hdr_available())return;
